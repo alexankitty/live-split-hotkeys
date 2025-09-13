@@ -2,6 +2,7 @@ use std::mem::size_of;
 use std::ptr::addr_of;
 use std::env;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use anyhow::{anyhow, Context, Result};
 use async_std::channel::{unbounded, Receiver, Sender};
@@ -200,9 +201,16 @@ impl HotkeyListener {
             .iter()
             .position(|&c| c == last_comparison)
             .unwrap_or(0);
+        
+        let mut last_states: HashSet<(u32, bool)> = HashSet::new();
 
         loop {
             let (code, is_pressed) = receiver.recv().await?;
+            if !last_states.insert((code, is_pressed)) {
+                continue; // duplicate, skip
+            }
+            // Remove the opposite state to keep the set small
+            last_states.remove(&(code, !is_pressed));
             if self.args.verbose > 1 {
                 println!("Key {} = {}", code, is_pressed);
             }
