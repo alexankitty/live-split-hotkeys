@@ -148,15 +148,13 @@ impl HotkeyListener {
                 _ => (),
             }
         }
-        // Always include "None" as a fallback option
+        // Always include "Personal Best"
         let mut enabled: Vec<&'static str> = Self::COMPARISONS
             .iter()
             .filter(|&&c| enabled_map.get(c).copied().unwrap_or(false))
             .copied()
             .collect();
-        if enabled.is_empty() || !enabled.contains(&"None") {
-            enabled.push("None");
-        }
+        enabled.push("Personal Best");
         Ok(enabled)
     }
 
@@ -188,27 +186,17 @@ impl HotkeyListener {
 
         let enabled_comparisons = Self::read_enabled_comparisons(self.args.settings.as_deref())?;
 
-        let mut enabled_indices: Vec<usize> = enabled_comparisons
+        let enabled_indices: Vec<usize> = enabled_comparisons
             .iter()
             .filter_map(|&name| {
-                if name == "None" {
-                    Some(Self::COMPARISON_COMMANDS.len() - 1)
-                } else {
                     Self::COMPARISONS.iter().position(|&c| c == name)
-                }
             })
             .collect();
-
-        let none_index = Self::COMPARISON_COMMANDS.len() - 1;
-        let none_enabled = enabled_indices.contains(&none_index);
-        if !none_enabled {
-            enabled_indices.retain(|&idx| idx != none_index);
-        }
 
         let last_comparison = Self::read_last_comparison(self.args.settings.as_deref())?
             .unwrap_or_else(|| "Personal Best".to_string());
 
-        let mut comparison_index = Self::COMPARISONS
+        let mut comparison_index = enabled_comparisons
             .iter()
             .position(|&c| c == last_comparison)
             .unwrap_or(0);
