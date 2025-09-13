@@ -1,5 +1,7 @@
 use std::mem::size_of;
 use std::ptr::addr_of;
+use std::env;
+use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
 use async_std::channel::{unbounded, Receiver, Sender};
@@ -16,6 +18,9 @@ use libc::input_event;
 
 mod key;
 use key::*;
+
+use quick_xml::events::Event as XmlEvent;
+use quick_xml::Reader as XmlReader;
 
 /// Listen for LiveSplit hotkeys
 #[derive(Parser, Debug)]
@@ -52,6 +57,109 @@ impl HotkeyListener {
         Ok(Self { args, key_state })
     }
 
+    const COMPARISONS: [&'static str; 8] = [
+        "Best Segments",
+        "Best Split Times",
+        "Average Segments",
+        "Median Segments",
+        "Worst Segments",
+        "Balanced PB",
+        "Latest Run",
+        "Personal Best",
+    ];
+
+    pub const COMPARISON_COMMANDS: [&'static [u8]; 8] = [
+        b"setcomparison Best Segments\r\n",
+        b"setcomparison Best Split Times\r\n",
+        b"setcomparison Average Segments\r\n",
+        b"setcomparison Median Segments\r\n",
+        b"setcomparison Worst Segments\r\n",
+        b"setcomparison Balanced PB\r\n",
+        b"setcomparison Latest Run\r\n",
+        b"setcomparison Personal Best\r\n",
+    ];
+
+    fn read_last_comparison(settings_path: Option<&str>) -> Result<Option<String>> {
+         let mut reader = match settings_path {
+            Some(s) => XmlReader::from_file(s),
+            None => XmlReader::from_file(env::var("HOME")? + "/LiveSplit/settings.cfg"),
+        }
+        .context("Failed to open LiveSplit settings")?;
+        reader.trim_text(true);
+        let mut buf = Vec::new();
+        let mut last_comparison = None;
+        let mut found = false;
+
+        loop {
+            match reader.read_event_into(&mut buf)? {
+                XmlEvent::Start(e) if e.name().as_ref() == b"LastComparison" => {
+                    found = true;
+                }
+                XmlEvent::Text(e) if found => {
+                    last_comparison = Some(e.unescape()?.to_string());
+                    break;
+                }
+                XmlEvent::Eof => break,
+                _ => (),
+            }
+        }
+        Ok(last_comparison)
+    }
+
+    fn read_enabled_comparisons(settings_path: Option<&str>) -> Result<Vec<&'static str>> {
+        let mut reader = match settings_path {
+            Some(s) => XmlReader::from_file(s),
+            None => XmlReader::from_file(env::var("HOME")? + "/LiveSplit/settings.cfg"),
+        }
+        .context("Failed to open LiveSplit settings")?;
+        reader.trim_text(true);
+        let mut buf = Vec::new();
+        let mut in_states = false;
+        let mut enabled_map: HashMap<String, bool> = HashMap::new();
+        let mut current_name: Option<String> = None;
+
+        loop {
+            match reader.read_event_into(&mut buf)? {
+                XmlEvent::Start(e) => {
+                    if e.name().as_ref() == b"ComparisonGeneratorStates" {
+                        in_states = true;
+                    } else if in_states && e.name().as_ref() == b"Generator" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"name" {
+                                current_name = Some(attr.unescape_value()?.to_string());
+                            }
+                        }
+                    }
+                }
+                XmlEvent::Text(e) => {
+                    if in_states {
+                        if let Some(name) = current_name.take() {
+                            let value = e.unescape()?.to_ascii_lowercase();
+                            enabled_map.insert(name, value == "true");
+                        }
+                    }
+                }
+                XmlEvent::End(e) => {
+                    if e.name().as_ref() == b"ComparisonGeneratorStates" {
+                        break;
+                    }
+                }
+                XmlEvent::Eof => break,
+                _ => (),
+            }
+        }
+        // Always include "None" as a fallback option
+        let mut enabled: Vec<&'static str> = Self::COMPARISONS
+            .iter()
+            .filter(|&&c| enabled_map.get(c).copied().unwrap_or(false))
+            .copied()
+            .collect();
+        if enabled.is_empty() || !enabled.contains(&"None") {
+            enabled.push("None");
+        }
+        Ok(enabled)
+    }
+
     async fn listen_keyboard(sender: Sender<(u32, bool)>, path: PathBuf) -> Result<()> {
         let ev_key = EV["KEY"] as u16;
         let mut file = File::open(path).await?;
@@ -78,6 +186,33 @@ impl HotkeyListener {
             .context("Could not connect to LiveSplit server")?;
         let mut paused = false;
 
+        let enabled_comparisons = Self::read_enabled_comparisons(self.args.settings.as_deref())?;
+
+        let mut enabled_indices: Vec<usize> = enabled_comparisons
+            .iter()
+            .filter_map(|&name| {
+                if name == "None" {
+                    Some(Self::COMPARISON_COMMANDS.len() - 1)
+                } else {
+                    Self::COMPARISONS.iter().position(|&c| c == name)
+                }
+            })
+            .collect();
+
+        let none_index = Self::COMPARISON_COMMANDS.len() - 1;
+        let none_enabled = enabled_indices.contains(&none_index);
+        if !none_enabled {
+            enabled_indices.retain(|&idx| idx != none_index);
+        }
+
+        let last_comparison = Self::read_last_comparison(self.args.settings.as_deref())?
+            .unwrap_or_else(|| "Best Segments".to_string());
+
+        let mut comparison_index = Self::COMPARISONS
+            .iter()
+            .position(|&c| c == last_comparison)
+            .unwrap_or(0);
+
         loop {
             let (code, is_pressed) = receiver.recv().await?;
             if self.args.verbose > 1 {
@@ -102,6 +237,18 @@ impl HotkeyListener {
                             if paused { b"resume\r\n" } else { b"pause\r\n" };
                         paused = !paused;
                         command
+                    }
+                    Hotkey::SwitchComparisonNext => {
+                        comparison_index = (comparison_index + 1) % enabled_indices.len();
+                        Self::COMPARISON_COMMANDS[enabled_indices[comparison_index]]
+                    }
+                    Hotkey::SwitchComparisonPrevious => {
+                        if comparison_index == 0 {
+                            comparison_index = enabled_indices.len() - 1;
+                        } else {
+                            comparison_index -= 1;
+                        }
+                        Self::COMPARISON_COMMANDS[enabled_indices[comparison_index]]
                     }
                     _ => continue,
                 };
