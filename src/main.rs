@@ -206,7 +206,7 @@ impl HotkeyListener {
         }
 
         let last_comparison = Self::read_last_comparison(self.args.settings.as_deref())?
-            .unwrap_or_else(|| "Best Segments".to_string());
+            .unwrap_or_else(|| "Personal Best".to_string());
 
         let mut comparison_index = Self::COMPARISONS
             .iter()
