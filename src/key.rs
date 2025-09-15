@@ -178,7 +178,7 @@ impl KeyState {
                         hotkeys[*hotkey] = mapper.map_combo(e.unescape()?.as_ref())?
                     }
                     XmlExpect::HotkeysEnabled => {
-                        hotkeys_enabled = e.unescape()?.trim().eq_ignore_ascii_case("true")
+                        hotkeys_enabled = true
                     }
                     _ => (),
                 },
